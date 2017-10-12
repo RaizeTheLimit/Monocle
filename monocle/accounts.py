@@ -352,7 +352,7 @@ class Account(db.Base):
         Otherwise, it will be set to 0 when level info is not available in pickles. 
         Level will be automatically updated upon login.
         """
-        clean_accounts, pickled_accounts = load_accounts_tuple()
+        clean_accounts, pickled_accounts, clean_accounts30 = load_accounts_tuple()
 
         imported = {}
 
@@ -456,7 +456,32 @@ class LoginCredentialsException(Exception):
 class EmailUnverifiedException(Exception):
     pass
 
+class CustomQueue(Queue):
+    def full_wait(self, maxsize=0, timeout=None):
+        '''Block until queue size falls below maxsize'''
+        starttime = monotonic()
+        with self.not_full:
+            if maxsize > 0:
+                if timeout is None:
+                    while self._qsize() >= maxsize:
+                        self.not_full.wait()
+                elif timeout < 0:
+                    raise ValueError("'timeout' must be a non-negative number")
+                else:
+                    endtime = monotonic() + timeout
+                    while self._qsize() >= maxsize:
+                        remaining = endtime - monotonic()
+                        if remaining <= 0.0:
+                            raise Full
+                        self.not_full.wait(remaining)
+            self.not_empty.notify()
+        endtime = monotonic()
+        return endtime - starttime
+
 class AccountQueue(Queue):
+    def min_max_level(self):
+        return (0,29)
+
     def _put(self, item):
         Account.put(item)
         if 'remove' in item and item['remove']:
@@ -466,15 +491,19 @@ class AccountQueue(Queue):
 
     def get(self, block=True, timeout=None):
         if self.qsize() == 0:
-            new_account = Account.get(0,29)
+            min_lv, max_lv = self.min_max_level()
+            new_account = Account.get(min_lv, max_lv)
             if new_account:
                 self.queue.append(new_account)
             else:
-                raise InsufficientAccountsException("Not enough accounts in DB") 
+                raise InsufficientAccountsException("Not enough accounts in DB in {}".format(self.__class__.__name__)) 
         return super().get(block=block, timeout=timeout)
 
+class Lv30AccountQueue(AccountQueue):
+    def min_max_level(self):
+        return (30,100)
 
-class CaptchaAccountQueue(Queue):
+class CaptchaAccountQueue(CustomQueue):
     def _init(self, maxsize):
         super()._init(maxsize)
 
@@ -511,6 +540,10 @@ def add_account_to_keep(dirty_accounts, add_account, clean_accounts):
 
 def load_accounts_tuple():
     pickled_accounts = utils.load_pickle('accounts')
+    accounts30 = utils.load_pickle('accounts30')
+
+    if not accounts30:
+        accounts30 = {}
 
     if conf.ACCOUNTS_CSV:
         accounts = load_accounts_csv()
@@ -539,13 +572,13 @@ def load_accounts_tuple():
     # Sync db and pickle
     accounts_dicts = Account.load_my_accounts(instance_id, accounts.keys())
     clean_accounts = {}
+    clean_accounts30 = {}
     for account_dict in accounts_dicts:
         level = account_dict['level']
-        if level < 30:
+        if not level or level < 30:
             add_account_to_keep(accounts, account_dict, clean_accounts)
         else:
-            # Nothing to do with Lv.30s yet
-            pass
+            add_account_to_keep(accounts30, account_dict, clean_accounts30)
 
     # Save once those accounts found in pickles and configs
     for username in accounts:
@@ -558,12 +591,8 @@ def load_accounts_tuple():
                 username, account_dict.get('level', 0))
 
     utils.dump_pickle('accounts', clean_accounts)
-    return clean_accounts, pickled_accounts
-
-
-def load_accounts():
-    return load_accounts_tuple()[0]
-
+    utils.dump_pickle('accounts30', clean_accounts30)
+    return clean_accounts, pickled_accounts, clean_accounts30
 
 def create_account_dict(account):
     if isinstance(account, (tuple, list)):
@@ -640,8 +669,12 @@ def accounts_from_csv(new_accounts, pickled_accounts):
         accounts[username] = account
     return accounts
 
-
 def get_accounts():
     if 'ACCOUNTS' not in bucket:
-        bucket['ACCOUNTS'] = load_accounts()
+        bucket['ACCOUNTS'], _, bucket['ACCOUNTS30'] = load_accounts_tuple() 
     return bucket['ACCOUNTS'] 
+
+def get_accounts30():
+    if 'ACCOUNTS30' not in bucket:
+        bucket['ACCOUNTS'], _, bucket['ACCOUNTS30'] = load_accounts_tuple() 
+    return bucket['ACCOUNTS30'] 

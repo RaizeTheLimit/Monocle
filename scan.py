@@ -28,40 +28,19 @@ from monocle.utils import get_address, dump_pickle
 from monocle.worker import Worker
 from monocle.overseer import Overseer
 from monocle.db import FORT_CACHE, RAID_CACHE, SIGHTING_CACHE
-from monocle.accounts import AccountQueue, CaptchaAccountQueue, get_accounts 
+from monocle.accounts import AccountQueue, CaptchaAccountQueue, Lv30AccountQueue, get_accounts, get_accounts30
 from monocle import altitudes, db_proc, spawns
 
 
 class AccountManager(BaseManager):
     pass
 
-
-class CustomQueue(CaptchaAccountQueue):
-    def full_wait(self, maxsize=0, timeout=None):
-        '''Block until queue size falls below maxsize'''
-        starttime = monotonic()
-        with self.not_full:
-            if maxsize > 0:
-                if timeout is None:
-                    while self._qsize() >= maxsize:
-                        self.not_full.wait()
-                elif timeout < 0:
-                    raise ValueError("'timeout' must be a non-negative number")
-                else:
-                    endtime = monotonic() + timeout
-                    while self._qsize() >= maxsize:
-                        remaining = endtime - monotonic()
-                        if remaining <= 0.0:
-                            raise Full
-                        self.not_full.wait(remaining)
-            self.not_empty.notify()
-        endtime = monotonic()
-        return endtime - starttime
-
-
-_captcha_queue = CustomQueue()
+_captcha_queue = CaptchaAccountQueue()
 _extra_queue = AccountQueue()
 _worker_dict = {}
+_lv30_captcha_queue = CaptchaAccountQueue()
+_lv30_account_queue = Lv30AccountQueue()
+_lv30_worker_dict = {}
 
 def get_captchas():
     return _captcha_queue
@@ -71,6 +50,15 @@ def get_extras():
 
 def get_workers():
     return _worker_dict
+
+def get_lv30_captchas():
+    return _captcha_queue
+
+def get_lv30_accounts():
+    return _lv30_account_queue 
+
+def get_lv30_workers():
+    return _lv30_worker_dict
 
 def mgr_init():
     signal(SIGINT, SIG_IGN)
@@ -158,6 +146,7 @@ def cleanup(overseer, manager):
 
         print('Dumping pickles...')
         dump_pickle('accounts', get_accounts())
+        dump_pickle('accounts30', get_accounts30())
         FORT_CACHE.pickle()
         RAID_CACHE.preload()
         altitudes.pickle()
@@ -193,8 +182,12 @@ def main():
 
     AccountManager.register('captcha_queue', callable=get_captchas)
     AccountManager.register('extra_queue', callable=get_extras)
+    AccountManager.register('lv30_captcha_queue', callable=get_lv30_captchas)
+    AccountManager.register('lv30_account_queue', callable=get_lv30_accounts)
     if conf.MAP_WORKERS:
         AccountManager.register('worker_dict', callable=get_workers,
+                                proxytype=DictProxy)
+        AccountManager.register('lv30_worker_dict', callable=get_lv30_workers,
                                 proxytype=DictProxy)
     address = get_address()
     manager = AccountManager(address=address, authkey=conf.AUTHKEY)

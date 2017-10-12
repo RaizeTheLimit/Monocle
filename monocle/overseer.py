@@ -14,9 +14,10 @@ from sqlalchemy.exc import OperationalError
 from .db import SIGHTING_CACHE, MYSTERY_CACHE, FORT_CACHE
 from .utils import get_current_hour, dump_pickle, get_start_coords, get_bootstrap_points, randomize_point, best_factors, percentage_split
 from .shared import get_logger, LOOP, run_threaded
-from .accounts import get_accounts, Account
+from .accounts import get_accounts, get_accounts30, Account
 from . import bounds, db_proc, spawns, sanitized as conf
 from .worker import Worker
+from .worker30 import Worker30
 from .notification import Notifier
 
 ANSI = '\x1b[2J\x1b[H'
@@ -77,25 +78,25 @@ class Overseer:
 
     def start(self, status_bar):
         self.captcha_queue = self.manager.captcha_queue()
-        Worker.captcha_queue = self.manager.captcha_queue()
         self.extra_queue = self.manager.extra_queue()
-        Worker.extra_queue = self.manager.extra_queue()
+        self.lv30_captcha_queue = self.manager.lv30_captcha_queue()
+        self.lv30_account_queue = self.manager.lv30_account_queue()
         if conf.MAP_WORKERS:
-            Worker.worker_dict = self.manager.worker_dict()
+            self.worker_dict = self.manager.worker_dict()
+            self.lv30_worker_dict = self.manager.lv30_worker_dict()
 
-        ACCOUNTS = get_accounts()
-        for username, account in ACCOUNTS.items():
-            account['username'] = username
-            if account.get('banned') or account.get('warn') or account.get('sbanned'):
-                continue
-            if account.get('captcha'):
-                self.captcha_queue.put(account)
-            else:
-                self.extra_queue.put(account)
-
+        self.account_dict = get_accounts()
+        self.lv30_account_dict = get_accounts30()
+        self.add_accounts_to_queue(self.account_dict, self.captcha_queue, self.extra_queue)
+        self.add_accounts_to_queue(self.account_dict, self.lv30_captcha_queue, self.lv30_account_queue)
+    
         for x in range(conf.GRID[0] * conf.GRID[1]):
             try:
-                self.workers.append(Worker(worker_no=x))
+                self.workers.append(Worker(worker_no=x,
+                    captcha_queue=self.captcha_queue,
+                    account_queue=self.extra_queue,
+                    worker_dict=self.worker_dict,
+                    account_dict=self.account_dict))
             except Exception as e:
                 traceback.print_exc()
                 self.log.error("Worker initialization error: {}", e)
@@ -107,6 +108,16 @@ class Overseer:
         LOOP.call_soon(self.update_stats)
         if status_bar:
             LOOP.call_soon(self.print_status)
+
+    def add_accounts_to_queue(self, account_dict, captcha_queue, account_queue):
+        for username, account in account_dict.items():
+            account['username'] = username
+            if account.get('banned') or account.get('warn') or account.get('sbanned'):
+                continue
+            if account.get('captcha'):
+                captcha_queue.put(account)
+            else:
+                account_queue.put(account)
 
     def update_count(self):
         self.things_count.append(str(db_proc.count))

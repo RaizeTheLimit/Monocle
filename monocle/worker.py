@@ -90,12 +90,16 @@ class Worker:
     if conf.PGSCOUT_ENDPOINT:
 	    PGScout_cycle=cycle(conf.PGSCOUT_ENDPOINT)
 
-    def __init__(self, worker_no):
-        self.worker_no = worker_no
+    def __init__(self, worker_no, captcha_queue, account_queue, worker_dict, account_dict):
         self.log = get_logger('worker-{}'.format(worker_no))
+        self.worker_no = worker_no
+        self.account_queue = account_queue
+        self.captcha_queue = captcha_queue
+        self.worker_dict = worker_dict
+        self.account_dict = account_dict
         # account information
         try:
-            self.account = self.extra_queue.get_nowait()
+            self.account = self.account_queue.get_nowait()
         except (Empty, InsufficientAccountsException) as e:
             try:
                 self.account = self.captcha_queue.get_nowait()
@@ -1370,7 +1374,7 @@ class Worker:
         except AttributeError:
             pass
 
-        ACCOUNTS = get_accounts()
+        ACCOUNTS = self.account_dict
         if 'remove' in self.account and self.account['remove']:
             if self.username in ACCOUNTS:
                 del ACCOUNTS[self.username]
@@ -1424,29 +1428,29 @@ class Worker:
                 timestr = '{}m'.format(m)
             self.log.warning('Swapping {} which had been running for {}.', self.username, timestr)
             self.update_accounts_dict()
-            self.extra_queue.put(self.account)
+            self.account_queue.put(self.account)
             await self.new_account()
 
     async def swap_account(self, reason=''):
         self.error_code = 'SWAPPING'
         self.log.warning('Swapping out {} because {}.', self.username, reason)
         self.update_accounts_dict()
-        self.extra_queue.put(self.account)
+        self.account_queue.put(self.account)
         await self.new_account()
 
     async def new_account(self, after_remove=False):
         if (conf.CAPTCHA_KEY
-                and (conf.FAVOR_CAPTCHA or self.extra_queue.empty())
+                and (conf.FAVOR_CAPTCHA or self.account_queue.empty())
                 and not self.captcha_queue.empty()):
             self.account = self.captcha_queue.get()
         else:
             try:
-                self.account = self.extra_queue.get_nowait()
+                self.account = self.account_queue.get_nowait()
             except Empty as e:
                 if after_remove:
                     raise InsufficientAccountsException("No more accounts available to replace removed account")
                 else:
-                    self.account = await run_threaded(self.extra_queue.get)
+                    self.account = await run_threaded(self.account_queue.get)
             except InsufficientAccountsException:
                 raise InsufficientAccountsException("No more accounts available to replace removed account")
         self.username = self.account['username']
