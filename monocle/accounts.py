@@ -4,6 +4,7 @@ import csv
 from asyncio import run_coroutine_threadsafe
 from time import time
 from queue import Queue
+from threading import Semaphore
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, UniqueConstraint, exists, func, or_
 from sqlalchemy.types import Integer, Boolean, Enum, SmallInteger, String
@@ -14,6 +15,7 @@ log = get_logger(__name__)
 
 instance_id = conf.INSTANCE_ID[-32:]
 bucket = {}
+account_get_sem = Semaphore()
 
 class Provider(enum.Enum):
     ptc = 1
@@ -229,15 +231,16 @@ class Account(db.Base):
 
     @staticmethod
     def get(min_level, max_level):
-        with db.session_scope() as session:
-            q = Account.query_builder(session, min_level, max_level)
-            account = q.with_lockmode("update").first()
-            if account:
-                account.instance = instance_id
-                account_dict = Account.to_account_dict(account)
-                log.info("New account {} acquired and binded to this instance in DB.", account.username)
-            else:
-                account_dict = None
+        with account_get_sem:
+            with db.session_scope() as session:
+                q = Account.query_builder(session, min_level, max_level)
+                account = q.with_lockmode("update").first()
+                if account:
+                    account.instance = instance_id
+                    account_dict = Account.to_account_dict(account)
+                    log.info("New account {} acquired and binded to this instance in DB.", account.username)
+                else:
+                    account_dict = None
         return account_dict
 
 
